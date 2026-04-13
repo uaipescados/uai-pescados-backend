@@ -1,7 +1,6 @@
 {
   "name": "uai-pescados-backend",
   "version": "1.0.0",
-  "description": "Backend inicial do sistema Uai Pescados",
   "main": "server.js",
   "scripts": {
     "start": "node server.js"
