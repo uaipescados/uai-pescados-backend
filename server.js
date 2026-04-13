@@ -167,16 +167,45 @@ async function criarTabelas() {
       criado_em TIMESTAMP DEFAULT NOW()
     );
 
+    CREATE TABLE IF NOT EXISTS financeiro_historico (
+      id SERIAL PRIMARY KEY,
+      tipo_origem TEXT,
+      origem_id INTEGER,
+      acao TEXT,
+      descricao TEXT,
+      valor NUMERIC DEFAULT 0,
+      data_evento TIMESTAMP DEFAULT NOW()
+    );
+
     ALTER TABLE contas_receber ADD COLUMN IF NOT EXISTS antecipacao_id INTEGER REFERENCES antecipacoes(id);
+    ALTER TABLE contas_receber ADD COLUMN IF NOT EXISTS tipo_recebivel TEXT;
     ALTER TABLE contas_receber ADD COLUMN IF NOT EXISTS data_recebimento DATE;
+    ALTER TABLE contas_receber ADD COLUMN IF NOT EXISTS data_baixa DATE;
+    ALTER TABLE contas_receber ADD COLUMN IF NOT EXISTS data_devolucao DATE;
     ALTER TABLE contas_receber ADD COLUMN IF NOT EXISTS valor_recebido NUMERIC DEFAULT 0;
+
     ALTER TABLE cheques ADD COLUMN IF NOT EXISTS antecipacao_id INTEGER REFERENCES antecipacoes(id);
+    ALTER TABLE cheques ADD COLUMN IF NOT EXISTS conta_receber_id INTEGER REFERENCES contas_receber(id);
+    ALTER TABLE cheques ADD COLUMN IF NOT EXISTS data_baixa DATE;
+    ALTER TABLE cheques ADD COLUMN IF NOT EXISTS data_devolucao DATE;
+    ALTER TABLE cheques ADD COLUMN IF NOT EXISTS observacoes TEXT;
+
+    ALTER TABLE antecipacao_itens ADD COLUMN IF NOT EXISTS valor_bruto NUMERIC DEFAULT 0;
+    ALTER TABLE antecipacao_itens ADD COLUMN IF NOT EXISTS valor_liquido NUMERIC DEFAULT 0;
+    ALTER TABLE antecipacao_itens ADD COLUMN IF NOT EXISTS valor_taxa NUMERIC DEFAULT 0;
+    ALTER TABLE antecipacao_itens ADD COLUMN IF NOT EXISTS status TEXT DEFAULT 'antecipado';
 
     CREATE INDEX IF NOT EXISTS idx_venda_itens_venda ON venda_itens(venda_id);
     CREATE INDEX IF NOT EXISTS idx_pagamentos_venda_venda ON pagamentos_venda(venda_id);
     CREATE INDEX IF NOT EXISTS idx_cheques_venda ON cheques(venda_id);
     CREATE INDEX IF NOT EXISTS idx_receber_cliente ON contas_receber(cliente_id);
+    CREATE INDEX IF NOT EXISTS idx_receber_antecipacao ON contas_receber(antecipacao_id);
+    CREATE INDEX IF NOT EXISTS idx_cheques_antecipacao ON cheques(antecipacao_id);
     CREATE INDEX IF NOT EXISTS idx_financeiro_data ON lancamentos_financeiros(data_lancamento);
+    CREATE INDEX IF NOT EXISTS idx_antecipacao_data ON antecipacoes(data_lancamento);
+    CREATE INDEX IF NOT EXISTS idx_antecipacao_itens_antecipacao ON antecipacao_itens(antecipacao_id);
+    CREATE INDEX IF NOT EXISTS idx_antecipacao_itens_receber ON antecipacao_itens(conta_receber_id);
+    CREATE INDEX IF NOT EXISTS idx_historico_origem ON financeiro_historico(tipo_origem, origem_id);
   `);
   console.log('Tabelas criadas');
 }
