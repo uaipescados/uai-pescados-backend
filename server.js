@@ -721,7 +721,7 @@ app.post('/antecipacoes', async (req, res) => {
       await client.query(
         `insert into lancamentos_financeiros (codigo, tipo, categoria, favorecido, conta_id, valor, data_lancamento, origem, origem_id, observacoes)
          values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)`,
-        [`FIN-ANT-TX-${created.rows[0].id}`, 'saida', 'taxa antecipacao', instName || 'Borderô', accountId || null, taxa, date || null, 'antecipacao', created.rows[0].id, bordero || obs || null]
+        [`FIN-ANT-TX-${created.rows[0].id}`, 'saida', 'taxa antecipacao', instName || 'Borderô', null, taxa, date || null, 'antecipacao', created.rows[0].id, bordero || obs || null]
       );
     }
     await client.query('COMMIT');
