@@ -265,17 +265,6 @@ async function criarTabelas() {
       criado_em TIMESTAMP DEFAULT NOW()
     );
 
-
-    CREATE INDEX IF NOT EXISTS idx_venda_itens_venda ON venda_itens(venda_id);
-    CREATE INDEX IF NOT EXISTS idx_pagamentos_venda_venda ON pagamentos_venda(venda_id);
-    CREATE INDEX IF NOT EXISTS idx_cheques_venda ON cheques(venda_id);
-    CREATE INDEX IF NOT EXISTS idx_receber_cliente ON contas_receber(cliente_id);
-    CREATE INDEX IF NOT EXISTS idx_financeiro_data ON lancamentos_financeiros(data_lancamento);
-    CREATE INDEX IF NOT EXISTS idx_pagar_status ON contas_pagar(status);
-    CREATE INDEX IF NOT EXISTS idx_compras_produto ON compras(produto_id);
-    CREATE INDEX IF NOT EXISTS idx_lotes_fornecedor ON lotes(fornecedor_id);
-    CREATE INDEX IF NOT EXISTS idx_producoes_lote ON producoes(lote_id);
-    CREATE INDEX IF NOT EXISTS idx_mov_estoque_produto ON movimentacoes_estoque(produto_id);
   `);
 
   await pool.query(`
@@ -365,6 +354,19 @@ async function criarTabelas() {
       status TEXT DEFAULT 'efetivado',
       criado_em TIMESTAMP DEFAULT NOW()
     );
+  `);
+
+  await pool.query(`
+    CREATE INDEX IF NOT EXISTS idx_venda_itens_venda ON venda_itens(venda_id);
+    CREATE INDEX IF NOT EXISTS idx_pagamentos_venda_venda ON pagamentos_venda(venda_id);
+    CREATE INDEX IF NOT EXISTS idx_cheques_venda ON cheques(venda_id);
+    CREATE INDEX IF NOT EXISTS idx_receber_cliente ON contas_receber(cliente_id);
+    CREATE INDEX IF NOT EXISTS idx_financeiro_data ON lancamentos_financeiros(data_lancamento);
+    CREATE INDEX IF NOT EXISTS idx_pagar_status ON contas_pagar(status);
+    CREATE INDEX IF NOT EXISTS idx_compras_produto ON compras(produto_id);
+    CREATE INDEX IF NOT EXISTS idx_lotes_fornecedor ON lotes(fornecedor_id);
+    CREATE INDEX IF NOT EXISTS idx_producoes_lote ON producoes(lote_id);
+    CREATE INDEX IF NOT EXISTS idx_mov_estoque_produto ON movimentacoes_estoque(produto_id);
   `);
 
   console.log('Tabelas criadas');
