@@ -19,6 +19,60 @@ function num(v) {
   return Number(v || 0);
 }
 
+
+async function registrarVenda(client, vendaId, codigo, customerId, date, obs, items, payments) {
+  const clienteRes = await client.query('select nome from clientes where id = $1', [customerId]);
+  const nomeCliente = clienteRes.rows[0] ? clienteRes.rows[0].nome : '';
+  let recSeq = 1;
+  let finSeq = 1;
+  let chequeSeq = 1;
+
+  for (const item of items || []) {
+    await client.query(
+      `insert into venda_itens (venda_id, produto_id, quantidade_kg, valor_unitario, valor_total)
+       values ($1,$2,$3,$4,$5)`,
+      [vendaId, item.productId, item.qty || 0, item.unitPrice || 0, item.total || 0]
+    );
+    await client.query(
+      `insert into movimentacoes_estoque (produto_id, tipo, origem, origem_id, quantidade_kg, valor_unitario, data_movimento)
+       values ($1,$2,$3,$4,$5,$6,$7)`,
+      [item.productId, 'saida', 'venda', vendaId, item.qty || 0, item.unitPrice || 0, date]
+    );
+  }
+
+  for (const pay of payments || []) {
+    const pagamento = await client.query(
+      `insert into pagamentos_venda (venda_id, tipo_pagamento, valor, conta_id, data_prevista, observacoes)
+       values ($1,$2,$3,$4,$5,$6)
+       returning id`,
+      [vendaId, pay.type, pay.value || 0, pay.accountId || null, pay.dueDate || null, pay.obs || null]
+    );
+    const pagamentoId = pagamento.rows[0].id;
+
+    if (pay.type === 'cheque') {
+      await client.query(
+        `insert into cheques (codigo, venda_id, cliente_id, numero_cheque, banco, emitente_nome, valor, data_vencimento, status)
+         values ($1,$2,$3,$4,$5,$6,$7,$8,$9)`,
+        [pay.chequeCode || `${codigo}-CHQ${String(chequeSeq++).padStart(2,'0')}`, vendaId, customerId, pay.number || null, pay.bank || null, pay.emitter || null, pay.value || 0, pay.dueDate || null, 'em carteira']
+      );
+    }
+
+    if (pay.type === 'dinheiro' || pay.type === 'pix') {
+      await client.query(
+        `insert into lancamentos_financeiros (codigo, tipo, categoria, favorecido, conta_id, valor, data_lancamento, origem, origem_id, observacoes)
+         values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)`,
+        [`FIN-${codigo}-${String(finSeq++).padStart(2,'0')}`, 'entrada', 'recebimento de venda', nomeCliente, pay.accountId || null, pay.value || 0, date, 'venda', vendaId, pay.type]
+      );
+    } else if (pay.type === 'boleto' || pay.type === 'cheque' || pay.type === 'cartao') {
+      await client.query(
+        `insert into contas_receber (codigo, cliente_id, nome_cliente, categoria, valor_original, valor_aberto, data_lancamento, data_vencimento, status, origem, origem_id, observacoes)
+         values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)`,
+        [`REC-${codigo}-${String(recSeq++).padStart(2,'0')}`, customerId, nomeCliente, `${pay.type} venda`, pay.value || 0, pay.value || 0, date, pay.dueDate || date, 'aberto', 'venda', pagamentoId, pay.obs || null]
+      );
+    }
+  }
+}
+
 async function criarTabelas() {
   await pool.query(`
     CREATE TABLE IF NOT EXISTS clientes (
@@ -223,6 +277,34 @@ async function criarTabelas() {
     CREATE INDEX IF NOT EXISTS idx_producoes_lote ON producoes(lote_id);
     CREATE INDEX IF NOT EXISTS idx_mov_estoque_produto ON movimentacoes_estoque(produto_id);
   `);
+
+  await pool.query(`
+    ALTER TABLE movimentacoes_estoque ADD COLUMN IF NOT EXISTS origem TEXT;
+    ALTER TABLE movimentacoes_estoque ADD COLUMN IF NOT EXISTS origem_id INTEGER;
+    ALTER TABLE movimentacoes_estoque ADD COLUMN IF NOT EXISTS quantidade_kg NUMERIC DEFAULT 0;
+    ALTER TABLE movimentacoes_estoque ADD COLUMN IF NOT EXISTS valor_unitario NUMERIC DEFAULT 0;
+    ALTER TABLE movimentacoes_estoque ADD COLUMN IF NOT EXISTS data_movimento DATE;
+
+    ALTER TABLE cheques ADD COLUMN IF NOT EXISTS status TEXT DEFAULT 'em carteira';
+    ALTER TABLE cheques ADD COLUMN IF NOT EXISTS banco TEXT;
+    ALTER TABLE cheques ADD COLUMN IF NOT EXISTS emitente_nome TEXT;
+
+    CREATE TABLE IF NOT EXISTS antecipacoes (
+      id SERIAL PRIMARY KEY,
+      codigo TEXT,
+      data_lancamento DATE,
+      instituicao TEXT,
+      bordero TEXT,
+      conta_id INTEGER,
+      valor_bruto NUMERIC DEFAULT 0,
+      valor_liquido NUMERIC DEFAULT 0,
+      valor_taxa NUMERIC DEFAULT 0,
+      observacoes TEXT,
+      status TEXT DEFAULT 'efetivado',
+      criado_em TIMESTAMP DEFAULT NOW()
+    );
+  `);
+
   console.log('Tabelas criadas');
 }
 
@@ -427,60 +509,118 @@ app.post('/vendas', async (req, res) => {
     );
     const vendaId = venda.rows[0].id;
 
-    const clienteRes = await client.query('select nome from clientes where id = $1', [customerId]);
-    const nomeCliente = clienteRes.rows[0] ? clienteRes.rows[0].nome : '';
-
-    for (const item of items) {
-      await client.query(
-        `insert into venda_itens (venda_id, produto_id, quantidade_kg, valor_unitario, valor_total)
-         values ($1,$2,$3,$4,$5)`,
-        [vendaId, item.productId, item.qty || 0, item.unitPrice || 0, item.total || 0]
-      );
-      await client.query(
-        `insert into movimentacoes_estoque (produto_id, tipo, origem, origem_id, quantidade_kg, valor_unitario, data_movimento)
-         values ($1,$2,$3,$4,$5,$6,$7)`,
-        [item.productId, 'saida', 'venda', vendaId, item.qty || 0, item.unitPrice || 0, date]
-      );
-    }
-
-    let recSeq = 1;
-    let finSeq = 1;
-    let chequeSeq = 1;
-
-    for (const pay of payments) {
-      const pagamento = await client.query(
-        `insert into pagamentos_venda (venda_id, tipo_pagamento, valor, conta_id, data_prevista, observacoes)
-         values ($1,$2,$3,$4,$5,$6)
-         returning id`,
-        [vendaId, pay.type, pay.value || 0, pay.accountId || null, pay.dueDate || null, pay.obs || null]
-      );
-      const pagamentoId = pagamento.rows[0].id;
-
-      if (pay.type === 'cheque') {
-        await client.query(
-          `insert into cheques (codigo, venda_id, cliente_id, numero_cheque, banco, emitente_nome, valor, data_vencimento, status)
-           values ($1,$2,$3,$4,$5,$6,$7,$8,$9)`,
-          [pay.chequeCode || `${codigo}-CHQ${String(chequeSeq++).padStart(2,'0')}`, vendaId, customerId, pay.number || null, pay.bank || null, pay.emitter || null, pay.value || 0, pay.dueDate || null, 'em carteira']
-        );
-      }
-
-      if (pay.type === 'dinheiro' || pay.type === 'pix') {
-        await client.query(
-          `insert into lancamentos_financeiros (codigo, tipo, categoria, favorecido, conta_id, valor, data_lancamento, origem, origem_id, observacoes)
-           values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)`,
-          [`FIN-${codigo}-${String(finSeq++).padStart(2,'0')}`, 'entrada', 'recebimento de venda', nomeCliente, pay.accountId || null, pay.value || 0, date, 'venda', vendaId, pay.type]
-        );
-      } else if (pay.type === 'boleto' || pay.type === 'cheque' || pay.type === 'cartao') {
-        await client.query(
-          `insert into contas_receber (codigo, cliente_id, nome_cliente, categoria, valor_original, valor_aberto, data_lancamento, data_vencimento, status, origem, origem_id, observacoes)
-           values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)`,
-          [`REC-${codigo}-${String(recSeq++).padStart(2,'0')}`, customerId, nomeCliente, `${pay.type} venda`, pay.value || 0, pay.value || 0, date, pay.dueDate || date, 'aberto', 'venda', pagamentoId, pay.obs || null]
-        );
-      }
-    }
+    await registrarVenda(client, vendaId, codigo, customerId, date, obs, items, payments);
 
     await client.query('COMMIT');
     res.status(201).json({ ok: true, id: vendaId });
+  } catch (error) {
+    await client.query('ROLLBACK');
+    res.status(500).json({ error: error.message });
+  } finally {
+    client.release();
+  }
+});
+
+
+app.put('/vendas/:id', async (req, res) => {
+  const id = Number(req.params.id);
+  const { codigo, customerId, date, total, openAmount, obs, items, payments } = req.body;
+  if (!customerId) return res.status(400).json({ error: 'Cliente é obrigatório.' });
+  if (!Array.isArray(items) || !items.length) return res.status(400).json({ error: 'Informe ao menos um item.' });
+  if (!Array.isArray(payments) || !payments.length) return res.status(400).json({ error: 'Informe ao menos um pagamento.' });
+
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    const vendaAtual = await client.query('select * from vendas where id=$1', [id]);
+    if (!vendaAtual.rows.length) throw new Error('Venda não encontrada.');
+
+    await client.query('delete from movimentacoes_estoque where origem=$1 and origem_id=$2', ['venda', id]);
+    await client.query('delete from lancamentos_financeiros where origem=$1 and origem_id=$2', ['venda', id]);
+    await client.query("delete from contas_receber where origem='venda' and origem_id in (select id from pagamentos_venda where venda_id=$1)", [id]);
+    await client.query('delete from cheques where venda_id=$1', [id]);
+    await client.query('delete from pagamentos_venda where venda_id=$1', [id]);
+    await client.query('delete from venda_itens where venda_id=$1', [id]);
+
+    await client.query(
+      `update vendas
+       set codigo=$1, cliente_id=$2, data_venda=$3, valor_total=$4, valor_aberto=$5, observacoes=$6
+       where id=$7`,
+      [codigo || vendaAtual.rows[0].codigo, customerId, date, total || 0, openAmount || 0, obs || null, id]
+    );
+
+    await registrarVenda(client, id, codigo || vendaAtual.rows[0].codigo, customerId, date, obs, items, payments);
+
+    await client.query('COMMIT');
+    res.json({ ok: true, id });
+  } catch (error) {
+    await client.query('ROLLBACK');
+    res.status(500).json({ error: error.message });
+  } finally {
+    client.release();
+  }
+});
+
+app.get('/antecipacoes', async (_req, res) => {
+  try {
+    const result = await pool.query('select * from antecipacoes order by data_lancamento desc, id desc');
+    res.json(result.rows.map(a => ({
+      id: a.id,
+      codigo: a.codigo,
+      data_lancamento: a.data_lancamento,
+      instituicao: a.instituicao,
+      bordero: a.bordero,
+      conta_id: a.conta_id,
+      valor_bruto: num(a.valor_bruto),
+      valor_liquido: num(a.valor_liquido),
+      valor_taxa: num(a.valor_taxa),
+      observacoes: a.observacoes || '',
+      status: a.status || 'efetivado'
+    })));
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+app.post('/antecipacoes', async (req, res) => {
+  const { codigo, institutionId, institution, date, accountId, bordero, net, gross, fee, chequeIds, obs } = req.body;
+  const ids = Array.isArray(chequeIds) ? chequeIds.map(Number).filter(Boolean) : [];
+  if (!ids.length) return res.status(400).json({ error: 'Selecione ao menos um cheque.' });
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    const cheques = await client.query('select * from cheques where id = any($1::int[]) order by id asc', [ids]);
+    if (cheques.rows.length !== ids.length) throw new Error('Nem todos os cheques foram encontrados.');
+    for (const c of cheques.rows) {
+      if ((c.status || '').toLowerCase() !== 'em carteira') throw new Error('Há cheque fora da carteira na seleção.');
+    }
+    const bruto = gross != null ? num(gross) : cheques.rows.reduce((s, c) => s + num(c.valor), 0);
+    const liquido = num(net);
+    const taxa = fee != null ? num(fee) : Math.max(0, bruto - liquido);
+    const instName = institution || null;
+    const created = await client.query(
+      `insert into antecipacoes (codigo, data_lancamento, instituicao, bordero, conta_id, valor_bruto, valor_liquido, valor_taxa, observacoes, status)
+       values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)
+       returning *`,
+      [codigo || null, date || null, instName, bordero || null, accountId || null, bruto, liquido, taxa, obs || null, 'efetivado']
+    );
+    for (const c of cheques.rows) {
+      await client.query('update cheques set status=$1 where id=$2', ['antecipado', c.id]);
+    }
+    await client.query(
+      `insert into lancamentos_financeiros (codigo, tipo, categoria, favorecido, conta_id, valor, data_lancamento, origem, origem_id, observacoes)
+       values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)`,
+      [`FIN-ANT-${created.rows[0].id}`, 'entrada', 'antecipacao', instName || 'Borderô', accountId || null, liquido, date || null, 'antecipacao', created.rows[0].id, bordero || obs || null]
+    );
+    if (taxa > 0) {
+      await client.query(
+        `insert into lancamentos_financeiros (codigo, tipo, categoria, favorecido, conta_id, valor, data_lancamento, origem, origem_id, observacoes)
+         values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)`,
+        [`FIN-ANT-TX-${created.rows[0].id}`, 'saida', 'taxa antecipacao', instName || 'Borderô', accountId || null, taxa, date || null, 'antecipacao', created.rows[0].id, bordero || obs || null]
+      );
+    }
+    await client.query('COMMIT');
+    res.status(201).json(created.rows[0]);
   } catch (error) {
     await client.query('ROLLBACK');
     res.status(500).json({ error: error.message });
