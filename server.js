@@ -1,3 +1,39 @@
+const { Pool } = require('pg');
+
+const pool = new Pool({
+  connectionString: process.env.DATABASE_URL,
+});
+
+async function criarTabelas() {
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS clientes (
+      id SERIAL PRIMARY KEY,
+      nome TEXT,
+      telefone TEXT,
+      cidade TEXT,
+      criado_em TIMESTAMP DEFAULT NOW()
+    );
+
+    CREATE TABLE IF NOT EXISTS fornecedores (
+      id SERIAL PRIMARY KEY,
+      nome TEXT,
+      telefone TEXT,
+      cidade TEXT,
+      criado_em TIMESTAMP DEFAULT NOW()
+    );
+
+    CREATE TABLE IF NOT EXISTS produtos (
+      id SERIAL PRIMARY KEY,
+      nome TEXT,
+      tipo TEXT,
+      criado_em TIMESTAMP DEFAULT NOW()
+    );
+  `);
+
+  console.log("Tabelas criadas");
+}
+
+criarTabelas();
 require('dotenv').config();
 const express = require('express');
 const cors = require('cors');
