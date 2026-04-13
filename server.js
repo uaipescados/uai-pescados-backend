@@ -19,6 +19,18 @@ function num(v) {
   return Number(v || 0);
 }
 
+function pad(n) {
+  return String(n).padStart(2, '0');
+}
+
+function tipoRecebivel(category) {
+  const c = String(category || '').toLowerCase();
+  if (c.includes('cheque')) return 'cheque';
+  if (c.includes('boleto')) return 'boleto';
+  if (c.includes('cart')) return 'cartao';
+  return 'outro';
+}
+
 async function criarTabelas() {
   await pool.query(`
     CREATE TABLE IF NOT EXISTS clientes (
@@ -129,6 +141,36 @@ async function criarTabelas() {
       observacoes TEXT,
       criado_em TIMESTAMP DEFAULT NOW()
     );
+
+    CREATE TABLE IF NOT EXISTS antecipacoes (
+      id SERIAL PRIMARY KEY,
+      codigo TEXT,
+      data_lancamento DATE,
+      tipo TEXT,
+      instituicao TEXT,
+      bordero TEXT,
+      conta_id INTEGER,
+      valor_bruto NUMERIC DEFAULT 0,
+      valor_liquido NUMERIC DEFAULT 0,
+      valor_taxa NUMERIC DEFAULT 0,
+      observacoes TEXT,
+      status TEXT DEFAULT 'efetivado',
+      criado_em TIMESTAMP DEFAULT NOW()
+    );
+
+    CREATE TABLE IF NOT EXISTS antecipacao_itens (
+      id SERIAL PRIMARY KEY,
+      antecipacao_id INTEGER REFERENCES antecipacoes(id) ON DELETE CASCADE,
+      conta_receber_id INTEGER REFERENCES contas_receber(id) ON DELETE CASCADE,
+      cheque_id INTEGER REFERENCES cheques(id),
+      valor NUMERIC DEFAULT 0,
+      criado_em TIMESTAMP DEFAULT NOW()
+    );
+
+    ALTER TABLE contas_receber ADD COLUMN IF NOT EXISTS antecipacao_id INTEGER REFERENCES antecipacoes(id);
+    ALTER TABLE contas_receber ADD COLUMN IF NOT EXISTS data_recebimento DATE;
+    ALTER TABLE contas_receber ADD COLUMN IF NOT EXISTS valor_recebido NUMERIC DEFAULT 0;
+    ALTER TABLE cheques ADD COLUMN IF NOT EXISTS antecipacao_id INTEGER REFERENCES antecipacoes(id);
 
     CREATE INDEX IF NOT EXISTS idx_venda_itens_venda ON venda_itens(venda_id);
     CREATE INDEX IF NOT EXISTS idx_pagamentos_venda_venda ON pagamentos_venda(venda_id);
@@ -417,6 +459,152 @@ app.get('/cheques', async (_req, res) => {
   }
 });
 
+app.get('/antecipacoes', async (_req, res) => {
+  const client = await pool.connect();
+  try {
+    const antecipacoes = await client.query('select * from antecipacoes order by data_lancamento desc, id desc');
+    const ids = antecipacoes.rows.map(x => x.id);
+    let itens = { rows: [] };
+    if (ids.length) {
+      itens = await client.query(
+        `select ai.*, cr.codigo as conta_codigo, cr.nome_cliente, cr.categoria, c.numero_cheque
+         from antecipacao_itens ai
+         left join contas_receber cr on cr.id = ai.conta_receber_id
+         left join cheques c on c.id = ai.cheque_id
+         where ai.antecipacao_id = any($1::int[])
+         order by ai.id asc`,
+        [ids]
+      );
+    }
+    res.json(antecipacoes.rows.map(a => ({
+      id: a.id,
+      codigo: a.codigo,
+      data_lancamento: a.data_lancamento,
+      tipo: a.tipo,
+      instituicao: a.instituicao || '',
+      bordero: a.bordero || '',
+      conta_id: a.conta_id,
+      valor_bruto: num(a.valor_bruto),
+      valor_liquido: num(a.valor_liquido),
+      valor_taxa: num(a.valor_taxa),
+      observacoes: a.observacoes || '',
+      status: a.status || 'efetivado',
+      itens: itens.rows.filter(i => i.antecipacao_id === a.id).map(i => ({
+        id: i.id,
+        conta_receber_id: i.conta_receber_id,
+        cheque_id: i.cheque_id,
+        valor: num(i.valor),
+        conta_codigo: i.conta_codigo || '',
+        nome_cliente: i.nome_cliente || '',
+        categoria: i.categoria || '',
+        numero_cheque: i.numero_cheque || ''
+      }))
+    })));
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  } finally {
+    client.release();
+  }
+});
+
+
+
+app.post('/antecipacoes', async (req, res) => {
+  const { codigo, date, institution, accountId, net, obs, receivableIds, bordero } = req.body;
+  const ids = Array.isArray(receivableIds) ? receivableIds.map(Number).filter(Boolean) : [];
+  if (!ids.length) return res.status(400).json({ error: 'Selecione ao menos um título para antecipar.' });
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    const contas = await client.query(
+      `select * from contas_receber
+       where id = any($1::int[])
+       order by id asc`,
+      [ids]
+    );
+    if (!contas.rows.length) throw new Error('Nenhum título encontrado.');
+    for (const row of contas.rows) {
+      if (!['aberto', 'parcial', 'devolvido'].includes(String(row.status || '').toLowerCase())) {
+        throw new Error(`Título ${row.codigo || row.id} não está disponível para antecipação.`);
+      }
+    }
+    const bruto = contas.rows.reduce((s, x) => s + num(x.valor_aberto), 0);
+    const liquido = num(net);
+    if (liquido <= 0) throw new Error('Informe o valor líquido.');
+    if (liquido > bruto) throw new Error('Valor líquido não pode ser maior que o bruto.');
+    const taxa = Math.max(0, bruto - liquido);
+    const tipoSet = new Set(contas.rows.map(x => tipoRecebivel(x.categoria)));
+    const tipo = tipoSet.size === 1 ? Array.from(tipoSet)[0] : 'misto';
+
+    const ant = await client.query(
+      `insert into antecipacoes (codigo, data_lancamento, tipo, instituicao, bordero, conta_id, valor_bruto, valor_liquido, valor_taxa, observacoes, status)
+       values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)
+       returning *`,
+      [codigo || null, date || null, tipo, institution || null, bordero || null, accountId || null, bruto, liquido, taxa, obs || null, 'efetivado']
+    );
+    const antecipacaoId = ant.rows[0].id;
+
+    for (const conta of contas.rows) {
+      let chequeId = null;
+      if (tipoRecebivel(conta.categoria) === 'cheque') {
+        const cheque = await client.query(
+          `select * from cheques
+           where cliente_id = $1 and valor = $2 and data_vencimento = $3
+           order by id desc limit 1`,
+          [conta.cliente_id, conta.valor_original, conta.data_vencimento]
+        );
+        if (cheque.rows[0]) {
+          chequeId = cheque.rows[0].id;
+          await client.query(
+            `update cheques set status='antecipado', antecipacao_id=$1 where id=$2`,
+            [antecipacaoId, chequeId]
+          );
+        }
+      }
+
+      await client.query(
+        `update contas_receber
+         set status='antecipado',
+             antecipacao_id=$1,
+             conta_id=$2,
+             valor_recebido=$3,
+             data_recebimento=$4,
+             valor_aberto=0
+         where id=$5`,
+        [antecipacaoId, accountId || null, num(conta.valor_original), date || null, conta.id]
+      );
+
+      await client.query(
+        `insert into antecipacao_itens (antecipacao_id, conta_receber_id, cheque_id, valor)
+         values ($1,$2,$3,$4)`,
+        [antecipacaoId, conta.id, chequeId, num(conta.valor_original)]
+      );
+    }
+
+    await client.query(
+      `insert into lancamentos_financeiros (codigo, tipo, categoria, favorecido, conta_id, valor, data_lancamento, origem, origem_id, observacoes)
+       values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)`,
+      [`FIN-ANT-${antecipacaoId}`, 'entrada', 'antecipacao', institution || 'Borderô', accountId || null, liquido, date || null, 'antecipacao', antecipacaoId, obs || bordero || null]
+    );
+
+    if (taxa > 0) {
+      await client.query(
+        `insert into lancamentos_financeiros (codigo, tipo, categoria, favorecido, conta_id, valor, data_lancamento, origem, origem_id, observacoes)
+         values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)`,
+        [`FIN-ANT-TX-${antecipacaoId}`, 'saida', 'taxa antecipacao', institution || 'Borderô', accountId || null, taxa, date || null, 'antecipacao', antecipacaoId, obs || bordero || null]
+      );
+    }
+
+    await client.query('COMMIT');
+    res.status(201).json({ ok: true, id: antecipacaoId, bruto, liquido, taxa });
+  } catch (error) {
+    await client.query('ROLLBACK');
+    res.status(500).json({ error: error.message });
+  } finally {
+    client.release();
+  }
+});
+
 app.get('/financeiro', async (_req, res) => {
   try {
     const result = await pool.query('select * from lancamentos_financeiros order by data_lancamento desc, id desc');
@@ -535,6 +723,62 @@ app.post('/contas-receber/:id/receber', async (req, res) => {
     );
     await client.query('COMMIT');
     res.json(updated.rows[0]);
+  } catch (error) {
+    await client.query('ROLLBACK');
+    res.status(500).json({ error: error.message });
+  } finally {
+    client.release();
+  }
+});
+
+
+app.post('/contas-receber/:id/devolver', async (req, res) => {
+  const id = Number(req.params.id);
+  const { date, obs } = req.body;
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    const atual = await client.query('select * from contas_receber where id=$1', [id]);
+    if (!atual.rows.length) throw new Error('Conta a receber não encontrada.');
+    const rec = atual.rows[0];
+    if (String(rec.status || '').toLowerCase() !== 'antecipado') {
+      throw new Error('Somente títulos antecipados podem ser devolvidos.');
+    }
+
+    await client.query(
+      `update contas_receber
+       set status='devolvido',
+           valor_aberto=valor_original,
+           conta_id=null,
+           data_recebimento=null,
+           valor_recebido=0
+       where id=$1`,
+      [id]
+    );
+
+    if (rec.antecipacao_id) {
+      const itens = await client.query(
+        'select * from antecipacao_itens where antecipacao_id=$1 and conta_receber_id=$2',
+        [rec.antecipacao_id, id]
+      );
+      for (const item of itens.rows) {
+        if (item.cheque_id) {
+          await client.query(
+            `update cheques set status='devolvido', antecipacao_id=null where id=$1`,
+            [item.cheque_id]
+          );
+        }
+      }
+    }
+
+    await client.query(
+      `insert into lancamentos_financeiros (codigo, tipo, categoria, favorecido, conta_id, valor, data_lancamento, origem, origem_id, observacoes)
+       values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)`,
+      [`FIN-DEV-${id}-${Date.now()}`, 'saida', 'devolucao antecipacao', rec.nome_cliente || '', null, num(rec.valor_original), date || null, 'conta_receber_devolucao', id, obs || 'Título devolvido após antecipação']
+    );
+
+    await client.query('COMMIT');
+    res.json({ ok: true });
   } catch (error) {
     await client.query('ROLLBACK');
     res.status(500).json({ error: error.message });
