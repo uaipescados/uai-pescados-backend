@@ -567,11 +567,11 @@ app.post('/antecipacoes', async (req, res) => {
          set status='antecipado',
              antecipacao_id=$1,
              conta_id=$2,
-             valor_recebido=$3,
-             data_recebimento=$4,
+             valor_recebido=0,
+             data_recebimento=$3,
              valor_aberto=0
-         where id=$5`,
-        [antecipacaoId, accountId || null, num(conta.valor_original), date || null, conta.id]
+         where id=$4`,
+        [antecipacaoId, accountId || null, date || null, conta.id]
       );
 
       await client.query(
@@ -591,7 +591,7 @@ app.post('/antecipacoes', async (req, res) => {
       await client.query(
         `insert into lancamentos_financeiros (codigo, tipo, categoria, favorecido, conta_id, valor, data_lancamento, origem, origem_id, observacoes)
          values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)`,
-        [`FIN-ANT-TX-${antecipacaoId}`, 'saida', 'taxa antecipacao', institution || 'Borderô', accountId || null, taxa, date || null, 'antecipacao', antecipacaoId, obs || bordero || null]
+        [`FIN-ANT-TX-${antecipacaoId}`, 'saida', 'taxa antecipacao', institution || 'Borderô', null, taxa, date || null, 'antecipacao', antecipacaoId, obs || bordero || null]
       );
     }
 
@@ -711,11 +711,28 @@ app.post('/contas-receber/:id/receber', async (req, res) => {
     const novoStatus = novoAberto === 0 ? 'recebido' : 'parcial';
     const updated = await client.query(
       `update contas_receber
-       set valor_aberto=$1, status=$2, conta_id=$3
+       set valor_aberto=$1, status=$2, conta_id=$3,
+           valor_recebido = coalesce(valor_recebido,0) + $5,
+           data_recebimento = $6
        where id=$4
        returning *`,
-      [novoAberto, novoStatus, accountId || rec.conta_id || null, id]
+      [novoAberto, novoStatus, accountId || rec.conta_id || null, id, num(value), date || null]
     );
+
+    if (tipoRecebivel(rec.categoria) === 'cheque') {
+      const cheque = await client.query(
+        `select * from cheques
+         where cliente_id = $1 and valor = $2 and data_vencimento = $3
+         order by id desc limit 1`,
+        [rec.cliente_id, rec.valor_original, rec.data_vencimento]
+      );
+      if (cheque.rows[0]) {
+        await client.query(
+          `update cheques set status=$1 where id=$2`,
+          [novoStatus === 'recebido' ? 'recebido' : 'parcial', cheque.rows[0].id]
+        );
+      }
+    }
     await client.query(
       `insert into lancamentos_financeiros (codigo, tipo, categoria, favorecido, conta_id, valor, data_lancamento, origem, origem_id, observacoes)
        values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)`,
