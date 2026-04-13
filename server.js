@@ -370,7 +370,19 @@ async function criarTabelas() {
   console.log('Tabelas criadas');
 }
 
-criarTabelas().catch(console.error);
+const schemaReady = criarTabelas().catch(error => {
+  console.error('Erro ao preparar banco:', error);
+  throw error;
+});
+
+app.use(async (_req, res, next) => {
+  try {
+    await schemaReady;
+    next();
+  } catch (error) {
+    res.status(500).json({ error: 'Falha ao preparar banco: ' + error.message });
+  }
+});
 
 app.get('/', (_req, res) => {
   res.json({ ok: true, service: 'uai-pescados-backend' });
@@ -423,6 +435,16 @@ app.put('/clientes/:id', async (req, res) => {
   }
 });
 
+app.delete('/clientes/:id', async (req, res) => {
+  const id = Number(req.params.id);
+  try {
+    await pool.query('delete from clientes where id=$1', [id]);
+    res.json({ ok: true });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
 app.get('/fornecedores', async (_req, res) => {
   try {
     const result = await pool.query('select * from fornecedores order by criado_em desc');
@@ -461,6 +483,16 @@ app.put('/fornecedores/:id', async (req, res) => {
   }
 });
 
+app.delete('/fornecedores/:id', async (req, res) => {
+  const id = Number(req.params.id);
+  try {
+    await pool.query('delete from fornecedores where id=$1', [id]);
+    res.json({ ok: true });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
 app.get('/produtos', async (_req, res) => {
   try {
     const result = await pool.query('select * from produtos order by criado_em desc');
@@ -494,6 +526,16 @@ app.put('/produtos/:id', async (req, res) => {
       [nome || '', tipo || 'revenda', unidade || 'kg', id]
     );
     res.json(result.rows[0]);
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+app.delete('/produtos/:id', async (req, res) => {
+  const id = Number(req.params.id);
+  try {
+    await pool.query('delete from produtos where id=$1', [id]);
+    res.json({ ok: true });
   } catch (error) {
     res.status(500).json({ error: error.message });
   }
