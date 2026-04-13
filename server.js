@@ -289,6 +289,68 @@ async function criarTabelas() {
     ALTER TABLE cheques ADD COLUMN IF NOT EXISTS banco TEXT;
     ALTER TABLE cheques ADD COLUMN IF NOT EXISTS emitente_nome TEXT;
 
+    ALTER TABLE compras ADD COLUMN IF NOT EXISTS codigo TEXT;
+    ALTER TABLE compras ADD COLUMN IF NOT EXISTS fornecedor_id INTEGER;
+    ALTER TABLE compras ADD COLUMN IF NOT EXISTS produto_id INTEGER;
+    ALTER TABLE compras ADD COLUMN IF NOT EXISTS quantidade_kg NUMERIC DEFAULT 0;
+    ALTER TABLE compras ADD COLUMN IF NOT EXISTS valor_custo NUMERIC DEFAULT 0;
+    ALTER TABLE compras ADD COLUMN IF NOT EXISTS valor_total NUMERIC DEFAULT 0;
+    ALTER TABLE compras ADD COLUMN IF NOT EXISTS tipo_pagamento TEXT;
+    ALTER TABLE compras ADD COLUMN IF NOT EXISTS conta_id INTEGER;
+    ALTER TABLE compras ADD COLUMN IF NOT EXISTS data_compra DATE;
+    ALTER TABLE compras ADD COLUMN IF NOT EXISTS data_vencimento DATE;
+    ALTER TABLE compras ADD COLUMN IF NOT EXISTS observacoes TEXT;
+
+    ALTER TABLE lotes ADD COLUMN IF NOT EXISTS codigo TEXT;
+    ALTER TABLE lotes ADD COLUMN IF NOT EXISTS fornecedor_id INTEGER;
+    ALTER TABLE lotes ADD COLUMN IF NOT EXISTS data_lote DATE;
+    ALTER TABLE lotes ADD COLUMN IF NOT EXISTS quantidade_kg NUMERIC DEFAULT 0;
+    ALTER TABLE lotes ADD COLUMN IF NOT EXISTS valor_kg NUMERIC DEFAULT 0;
+    ALTER TABLE lotes ADD COLUMN IF NOT EXISTS frete NUMERIC DEFAULT 0;
+    ALTER TABLE lotes ADD COLUMN IF NOT EXISTS valor_total NUMERIC DEFAULT 0;
+    ALTER TABLE lotes ADD COLUMN IF NOT EXISTS status TEXT DEFAULT 'disponível';
+    ALTER TABLE lotes ADD COLUMN IF NOT EXISTS observacoes TEXT;
+
+    ALTER TABLE producoes ADD COLUMN IF NOT EXISTS codigo TEXT;
+    ALTER TABLE producoes ADD COLUMN IF NOT EXISTS lote_id INTEGER;
+    ALTER TABLE producoes ADD COLUMN IF NOT EXISTS prestador TEXT;
+    ALTER TABLE producoes ADD COLUMN IF NOT EXISTS data_producao DATE;
+    ALTER TABLE producoes ADD COLUMN IF NOT EXISTS quantidade_total NUMERIC DEFAULT 0;
+    ALTER TABLE producoes ADD COLUMN IF NOT EXISTS custo_total NUMERIC DEFAULT 0;
+    ALTER TABLE producoes ADD COLUMN IF NOT EXISTS observacoes TEXT;
+
+    ALTER TABLE producao_itens ADD COLUMN IF NOT EXISTS produto_id INTEGER;
+    ALTER TABLE producao_itens ADD COLUMN IF NOT EXISTS quantidade_kg NUMERIC DEFAULT 0;
+    ALTER TABLE producao_itens ADD COLUMN IF NOT EXISTS custo_unitario NUMERIC DEFAULT 0;
+    ALTER TABLE producao_itens ADD COLUMN IF NOT EXISTS valor_total NUMERIC DEFAULT 0;
+
+    ALTER TABLE contas_pagar ADD COLUMN IF NOT EXISTS codigo TEXT;
+    ALTER TABLE contas_pagar ADD COLUMN IF NOT EXISTS favorecido TEXT;
+    ALTER TABLE contas_pagar ADD COLUMN IF NOT EXISTS categoria TEXT;
+    ALTER TABLE contas_pagar ADD COLUMN IF NOT EXISTS valor_original NUMERIC DEFAULT 0;
+    ALTER TABLE contas_pagar ADD COLUMN IF NOT EXISTS valor_aberto NUMERIC DEFAULT 0;
+    ALTER TABLE contas_pagar ADD COLUMN IF NOT EXISTS data_lancamento DATE;
+    ALTER TABLE contas_pagar ADD COLUMN IF NOT EXISTS data_vencimento DATE;
+    ALTER TABLE contas_pagar ADD COLUMN IF NOT EXISTS status TEXT DEFAULT 'aberto';
+    ALTER TABLE contas_pagar ADD COLUMN IF NOT EXISTS origem TEXT;
+    ALTER TABLE contas_pagar ADD COLUMN IF NOT EXISTS origem_id INTEGER;
+    ALTER TABLE contas_pagar ADD COLUMN IF NOT EXISTS conta_id INTEGER;
+    ALTER TABLE contas_pagar ADD COLUMN IF NOT EXISTS observacoes TEXT;
+
+    ALTER TABLE contas_receber ADD COLUMN IF NOT EXISTS codigo TEXT;
+    ALTER TABLE contas_receber ADD COLUMN IF NOT EXISTS cliente_id INTEGER;
+    ALTER TABLE contas_receber ADD COLUMN IF NOT EXISTS nome_cliente TEXT;
+    ALTER TABLE contas_receber ADD COLUMN IF NOT EXISTS categoria TEXT;
+    ALTER TABLE contas_receber ADD COLUMN IF NOT EXISTS valor_original NUMERIC DEFAULT 0;
+    ALTER TABLE contas_receber ADD COLUMN IF NOT EXISTS valor_aberto NUMERIC DEFAULT 0;
+    ALTER TABLE contas_receber ADD COLUMN IF NOT EXISTS data_lancamento DATE;
+    ALTER TABLE contas_receber ADD COLUMN IF NOT EXISTS data_vencimento DATE;
+    ALTER TABLE contas_receber ADD COLUMN IF NOT EXISTS status TEXT DEFAULT 'aberto';
+    ALTER TABLE contas_receber ADD COLUMN IF NOT EXISTS origem TEXT;
+    ALTER TABLE contas_receber ADD COLUMN IF NOT EXISTS origem_id INTEGER;
+    ALTER TABLE contas_receber ADD COLUMN IF NOT EXISTS conta_id INTEGER;
+    ALTER TABLE contas_receber ADD COLUMN IF NOT EXISTS observacoes TEXT;
+
     CREATE TABLE IF NOT EXISTS antecipacoes (
       id SERIAL PRIMARY KEY,
       codigo TEXT,
@@ -590,11 +652,10 @@ app.post('/antecipacoes', async (req, res) => {
   try {
     await client.query('BEGIN');
     const cheques = await client.query('select * from cheques where id = any($1::int[]) order by id asc', [ids]);
-    if (cheques.rows.length !== ids.length) throw new Error('Nem todos os cheques foram encontrados.');
-    for (const c of cheques.rows) {
-      if ((c.status || '').toLowerCase() !== 'em carteira') throw new Error('Há cheque fora da carteira na seleção.');
-    }
-    const bruto = gross != null ? num(gross) : cheques.rows.reduce((s, c) => s + num(c.valor), 0);
+    if (!cheques.rows.length) throw new Error('Nenhum cheque encontrado para o borderô.');
+    const elegiveis = cheques.rows.filter(c => (c.status || '').toLowerCase() === 'em carteira');
+    if (!elegiveis.length) throw new Error('Nenhum cheque em carteira foi selecionado.');
+    const bruto = gross != null ? num(gross) : elegiveis.reduce((s, c) => s + num(c.valor), 0);
     const liquido = num(net);
     const taxa = fee != null ? num(fee) : Math.max(0, bruto - liquido);
     const instName = institution || null;
@@ -604,7 +665,7 @@ app.post('/antecipacoes', async (req, res) => {
        returning *`,
       [codigo || null, date || null, instName, bordero || null, accountId || null, bruto, liquido, taxa, obs || null, 'efetivado']
     );
-    for (const c of cheques.rows) {
+    for (const c of elegiveis) {
       await client.query('update cheques set status=$1 where id=$2', ['antecipado', c.id]);
     }
     await client.query(
