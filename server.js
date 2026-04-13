@@ -509,6 +509,38 @@ app.get('/cheques', async (_req, res) => {
   }
 });
 
+app.post('/cheques/:id/devolver', async (req, res) => {
+  const id = Number(req.params.id);
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    const chequeRes = await client.query('select * from cheques where id=$1', [id]);
+    if (!chequeRes.rows.length) throw new Error('Cheque não encontrado.');
+    const cheque = chequeRes.rows[0];
+    await client.query('update cheques set status=$1 where id=$2', ['devolvido', id]);
+    const clienteRes = await client.query('select nome from clientes where id=$1', [cheque.cliente_id]);
+    const nomeCliente = clienteRes.rows[0] ? clienteRes.rows[0].nome : (cheque.emitente_nome || 'Cliente');
+    const rec = await client.query(
+      `insert into contas_receber (codigo, cliente_id, nome_cliente, categoria, valor_original, valor_aberto, data_lancamento, data_vencimento, status, origem, origem_id, observacoes)
+       values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)
+       returning *`,
+      [`DEV-CHQ-${id}`, cheque.cliente_id, nomeCliente, 'cheque devolvido', cheque.valor || 0, cheque.valor || 0, new Date(), cheque.data_vencimento || new Date(), 'aberto', 'cheque_devolvido', id, 'Cheque devolvido']
+    );
+    await client.query(
+      `insert into lancamentos_financeiros (codigo, tipo, categoria, favorecido, conta_id, valor, data_lancamento, origem, origem_id, observacoes)
+       values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)`,
+      [`FIN-DEV-CHQ-${id}`, 'saida', 'devolucao cheque', nomeCliente, null, cheque.valor || 0, new Date(), 'cheque', id, 'Cheque devolvido']
+    );
+    await client.query('COMMIT');
+    res.json({ ok: true, receivable: rec.rows[0] });
+  } catch (error) {
+    await client.query('ROLLBACK');
+    res.status(500).json({ error: error.message });
+  } finally {
+    client.release();
+  }
+});
+
 app.get('/financeiro', async (_req, res) => {
   try {
     const result = await pool.query('select * from lancamentos_financeiros order by data_lancamento desc, id desc');
