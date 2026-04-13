@@ -1,37 +1,3 @@
-const pool = new Pool({
-  connectionString: process.env.DATABASE_URL,
-});
-
-async function criarTabelas() {
-  await pool.query(`
-    CREATE TABLE IF NOT EXISTS clientes (
-      id SERIAL PRIMARY KEY,
-      nome TEXT,
-      telefone TEXT,
-      cidade TEXT,
-      criado_em TIMESTAMP DEFAULT NOW()
-    );
-
-    CREATE TABLE IF NOT EXISTS fornecedores (
-      id SERIAL PRIMARY KEY,
-      nome TEXT,
-      telefone TEXT,
-      cidade TEXT,
-      criado_em TIMESTAMP DEFAULT NOW()
-    );
-
-    CREATE TABLE IF NOT EXISTS produtos (
-      id SERIAL PRIMARY KEY,
-      nome TEXT,
-      tipo TEXT,
-      criado_em TIMESTAMP DEFAULT NOW()
-    );
-  `);
-
-  console.log("Tabelas criadas");
-}
-
-criarTabelas();
 require('dotenv').config();
 const express = require('express');
 const cors = require('cors');
@@ -42,14 +8,61 @@ app.use(cors());
 app.use(express.json());
 
 const DATABASE_URL = process.env.DATABASE_URL;
+
 if (!DATABASE_URL) {
   console.error('DATABASE_URL não definido.');
 }
 
+// conexão com banco
 const pool = new Pool({
   connectionString: DATABASE_URL,
-  ssl: process.env.NODE_ENV === 'production' ? { rejectUnauthorized: false } : false,
+  ssl: process.env.NODE_ENV === 'production'
+    ? { rejectUnauthorized: false }
+    : false,
 });
+
+// criar tabelas automaticamente
+async function criarTabelas() {
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS clientes (
+      id SERIAL PRIMARY KEY,
+      codigo TEXT,
+      nome TEXT,
+      telefone TEXT,
+      cidade TEXT,
+      limite_credito NUMERIC,
+      observacoes TEXT,
+      criado_em TIMESTAMP DEFAULT NOW()
+    );
+
+    CREATE TABLE IF NOT EXISTS fornecedores (
+      id SERIAL PRIMARY KEY,
+      codigo TEXT,
+      nome TEXT,
+      telefone TEXT,
+      cidade TEXT,
+      tipo TEXT,
+      observacoes TEXT,
+      criado_em TIMESTAMP DEFAULT NOW()
+    );
+
+    CREATE TABLE IF NOT EXISTS produtos (
+      id SERIAL PRIMARY KEY,
+      codigo TEXT,
+      nome TEXT,
+      tipo TEXT,
+      unidade TEXT,
+      criado_em TIMESTAMP DEFAULT NOW()
+    );
+  `);
+
+  console.log('Tabelas criadas');
+}
+
+// executa criação
+criarTabelas().catch(console.error);
+
+// ROTAS
 
 app.get('/', (_req, res) => {
   res.json({ ok: true, service: 'uai-pescados-backend' });
@@ -63,6 +76,8 @@ app.get('/health', async (_req, res) => {
     res.status(500).json({ ok: false, db: false, error: error.message });
   }
 });
+
+// CLIENTES
 
 app.get('/clientes', async (_req, res) => {
   try {
@@ -88,6 +103,8 @@ app.post('/clientes', async (req, res) => {
   }
 });
 
+// FORNECEDORES
+
 app.get('/fornecedores', async (_req, res) => {
   try {
     const result = await pool.query('select * from fornecedores order by criado_em desc');
@@ -112,6 +129,8 @@ app.post('/fornecedores', async (req, res) => {
   }
 });
 
+// PRODUTOS
+
 app.get('/produtos', async (_req, res) => {
   try {
     const result = await pool.query('select * from produtos order by criado_em desc');
@@ -135,6 +154,8 @@ app.post('/produtos', async (req, res) => {
     res.status(500).json({ error: error.message });
   }
 });
+
+// START
 
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
