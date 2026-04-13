@@ -178,6 +178,20 @@ app.post('/clientes', async (req, res) => {
   }
 });
 
+app.put('/clientes/:id', async (req, res) => {
+  const id = Number(req.params.id);
+  const { nome, telefone, cidade, limite_credito, observacoes } = req.body;
+  try {
+    const result = await pool.query(
+      `update clientes set nome=$1, telefone=$2, cidade=$3, limite_credito=$4, observacoes=$5 where id=$6 returning *`,
+      [nome || '', telefone || null, cidade || null, limite_credito || null, observacoes || null, id]
+    );
+    res.json(result.rows[0]);
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
 app.get('/fornecedores', async (_req, res) => {
   try {
     const result = await pool.query('select * from fornecedores order by criado_em desc');
@@ -202,6 +216,20 @@ app.post('/fornecedores', async (req, res) => {
   }
 });
 
+app.put('/fornecedores/:id', async (req, res) => {
+  const id = Number(req.params.id);
+  const { nome, telefone, cidade, tipo, observacoes } = req.body;
+  try {
+    const result = await pool.query(
+      `update fornecedores set nome=$1, telefone=$2, cidade=$3, tipo=$4, observacoes=$5 where id=$6 returning *`,
+      [nome || '', telefone || null, cidade || null, tipo || null, observacoes || null, id]
+    );
+    res.json(result.rows[0]);
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
 app.get('/produtos', async (_req, res) => {
   try {
     const result = await pool.query('select * from produtos order by criado_em desc');
@@ -221,6 +249,20 @@ app.post('/produtos', async (req, res) => {
       [codigo, nome, tipo || 'revenda', unidade || 'kg']
     );
     res.status(201).json(result.rows[0]);
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+app.put('/produtos/:id', async (req, res) => {
+  const id = Number(req.params.id);
+  const { nome, tipo, unidade } = req.body;
+  try {
+    const result = await pool.query(
+      `update produtos set nome=$1, tipo=$2, unidade=$3 where id=$4 returning *`,
+      [nome || '', tipo || 'revenda', unidade || 'kg', id]
+    );
+    res.json(result.rows[0]);
   } catch (error) {
     res.status(500).json({ error: error.message });
   }
