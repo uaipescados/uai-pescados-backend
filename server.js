@@ -1258,6 +1258,61 @@ app.get('/estoque-movimentos', async (_req, res) => {
 
 
 
+app.get('/relatorios/financeiro-resumo', async (_req, res) => {
+  try {
+    const [fin, rec, pay] = await Promise.all([
+      pool.query(`select 
+        coalesce(sum(case when tipo='entrada' then valor else 0 end),0) as entradas,
+        coalesce(sum(case when tipo='saida' then valor else 0 end),0) as saidas
+        from lancamentos_financeiros`),
+      pool.query(`select coalesce(sum(valor_aberto),0) as receber from contas_receber where coalesce(valor_aberto,0) > 0`),
+      pool.query(`select coalesce(sum(valor_aberto),0) as pagar from contas_pagar where coalesce(valor_aberto,0) > 0`)
+    ]);
+    res.json({
+      entradas: num(fin.rows[0].entradas),
+      saidas: num(fin.rows[0].saidas),
+      receber: num(rec.rows[0].receber),
+      pagar: num(pay.rows[0].pagar)
+    });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+app.get('/relatorios/financeiro-mensal', async (_req, res) => {
+  try {
+    const result = await pool.query(`
+      select to_char(date_trunc('month', coalesce(data_lancamento, now())), 'YYYY-MM') as mes,
+      coalesce(sum(case when tipo='entrada' then valor else 0 end),0) as entradas,
+      coalesce(sum(case when tipo='saida' then valor else 0 end),0) as saidas
+      from lancamentos_financeiros
+      group by 1
+      order by 1 desc
+      limit 12
+    `);
+    res.json(result.rows.map(r => ({ mes:r.mes, entradas:num(r.entradas), saidas:num(r.saidas), resultado:num(r.entradas)-num(r.saidas) })));
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+app.get('/relatorios/clientes-devedores', async (_req, res) => {
+  try {
+    const result = await pool.query(`
+      select codigo, nome_cliente, data_vencimento, valor_aberto
+      from contas_receber
+      where coalesce(valor_aberto,0) > 0
+      order by valor_aberto desc, data_vencimento asc
+      limit 20
+    `);
+    res.json(result.rows);
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+
+
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
   console.log(`Servidor rodando na porta ${PORT}`);
