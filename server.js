@@ -20,6 +20,16 @@ function num(v) {
 }
 
 
+
+async function logAudit(entidade, entidadeId, acao, detalhe) {
+  try {
+    await pool.query(
+      `insert into auditoria_logs (entidade, entidade_id, acao, detalhe) values ($1,$2,$3,$4)`,
+      [entidade, entidadeId || null, acao, detalhe ? String(detalhe).slice(0, 1000) : null]
+    );
+  } catch (_err) {}
+}
+
 async function registrarVenda(client, vendaId, codigo, customerId, date, obs, items, payments) {
   const clienteRes = await client.query('select nome from clientes where id = $1', [customerId]);
   const nomeCliente = clienteRes.rows[0] ? clienteRes.rows[0].nome : '';
@@ -36,7 +46,7 @@ async function registrarVenda(client, vendaId, codigo, customerId, date, obs, it
     await client.query(
       `insert into movimentacoes_estoque (produto_id, tipo, origem, origem_id, quantidade_kg, valor_unitario, data_movimento)
        values ($1,$2,$3,$4,$5,$6,$7)`,
-      [item.productId, 'saida', 'venda', vendaId, item.qty || 0, item.unitPrice || 0, date]
+      [item.productId, 'saida', 'venda', vendaId, item.qty || 0, 0, date]
     );
   }
 
@@ -357,6 +367,62 @@ async function criarTabelas() {
   `);
 
   await pool.query(`
+    ALTER TABLE lancamentos_financeiros ADD COLUMN IF NOT EXISTS centro_custo_id INTEGER;
+    ALTER TABLE lancamentos_financeiros ADD COLUMN IF NOT EXISTS plano_conta_id INTEGER;
+    ALTER TABLE contas_pagar ADD COLUMN IF NOT EXISTS centro_custo_id INTEGER;
+    ALTER TABLE contas_pagar ADD COLUMN IF NOT EXISTS plano_conta_id INTEGER;
+    ALTER TABLE contas_receber ADD COLUMN IF NOT EXISTS centro_custo_id INTEGER;
+    ALTER TABLE contas_receber ADD COLUMN IF NOT EXISTS plano_conta_id INTEGER;
+    ALTER TABLE compras ADD COLUMN IF NOT EXISTS centro_custo_id INTEGER;
+    ALTER TABLE compras ADD COLUMN IF NOT EXISTS plano_conta_id INTEGER;
+  `);
+
+
+
+  await pool.query(`
+
+    CREATE TABLE IF NOT EXISTS auditoria_logs (
+      id SERIAL PRIMARY KEY,
+      entidade TEXT,
+      entidade_id INTEGER,
+      acao TEXT,
+      detalhe TEXT,
+      criado_em TIMESTAMP DEFAULT NOW()
+    );
+
+    CREATE TABLE IF NOT EXISTS centros_custo (
+      id SERIAL PRIMARY KEY,
+      codigo TEXT,
+      nome TEXT,
+      ativo BOOLEAN DEFAULT TRUE,
+      criado_em TIMESTAMP DEFAULT NOW()
+    );
+
+    CREATE TABLE IF NOT EXISTS planos_conta (
+      id SERIAL PRIMARY KEY,
+      codigo TEXT,
+      nome TEXT,
+      tipo TEXT,
+      ativo BOOLEAN DEFAULT TRUE,
+      criado_em TIMESTAMP DEFAULT NOW()
+    );
+
+    CREATE TABLE IF NOT EXISTS recorrencias_pagar (
+      id SERIAL PRIMARY KEY,
+      descricao TEXT,
+      favorecido TEXT,
+      categoria TEXT,
+      valor NUMERIC DEFAULT 0,
+      conta_id INTEGER,
+      centro_custo_id INTEGER,
+      plano_conta_id INTEGER,
+      dia_vencimento INTEGER,
+      frequencia TEXT DEFAULT 'mensal',
+      ativo BOOLEAN DEFAULT TRUE,
+      criado_em TIMESTAMP DEFAULT NOW()
+    );
+
+
     CREATE INDEX IF NOT EXISTS idx_venda_itens_venda ON venda_itens(venda_id);
     CREATE INDEX IF NOT EXISTS idx_pagamentos_venda_venda ON pagamentos_venda(venda_id);
     CREATE INDEX IF NOT EXISTS idx_cheques_venda ON cheques(venda_id);
@@ -440,7 +506,16 @@ app.put('/clientes/:id', async (req, res) => {
 app.delete('/clientes/:id', async (req, res) => {
   const id = Number(req.params.id);
   try {
+    const vinc = await pool.query(`select
+      (select count(*) from vendas where cliente_id=$1) as vendas,
+      (select count(*) from contas_receber where cliente_id=$1) as receber,
+      (select count(*) from cheques where cliente_id=$1) as cheques`, [id]);
+    const row=vinc.rows[0]||{};
+    if (Number(row.vendas||0) || Number(row.receber||0) || Number(row.cheques||0)) {
+      return res.status(400).json({ error: 'Cliente possui vínculos e não pode ser excluído.' });
+    }
     await pool.query('delete from clientes where id=$1', [id]);
+    await logAudit('cliente', id, 'excluir', 'Cadastro excluído');
     res.json({ ok: true });
   } catch (error) {
     res.status(500).json({ error: error.message });
@@ -488,7 +563,12 @@ app.put('/fornecedores/:id', async (req, res) => {
 app.delete('/fornecedores/:id', async (req, res) => {
   const id = Number(req.params.id);
   try {
+    const vinc = await pool.query(`select (select count(*) from compras where fornecedor_id=$1) as compras`, [id]);
+    if (Number((vinc.rows[0]||{}).compras||0)) {
+      return res.status(400).json({ error: 'Fornecedor possui compras vinculadas e não pode ser excluído.' });
+    }
     await pool.query('delete from fornecedores where id=$1', [id]);
+    await logAudit('fornecedor', id, 'excluir', 'Cadastro excluído');
     res.json({ ok: true });
   } catch (error) {
     res.status(500).json({ error: error.message });
@@ -536,7 +616,17 @@ app.put('/produtos/:id', async (req, res) => {
 app.delete('/produtos/:id', async (req, res) => {
   const id = Number(req.params.id);
   try {
+    const vinc = await pool.query(`select
+      (select count(*) from venda_itens where produto_id=$1) as vendas,
+      (select count(*) from compras where produto_id=$1) as compras,
+      (select count(*) from producao_itens where produto_id=$1) as producao,
+      (select count(*) from movimentacoes_estoque where produto_id=$1) as estoque`, [id]);
+    const row=vinc.rows[0]||{};
+    if (Number(row.vendas||0) || Number(row.compras||0) || Number(row.producao||0) || Number(row.estoque||0)) {
+      return res.status(400).json({ error: 'Produto possui vínculos e não pode ser excluído.' });
+    }
     await pool.query('delete from produtos where id=$1', [id]);
+    await logAudit('produto', id, 'excluir', 'Cadastro excluído');
     res.json({ ok: true });
   } catch (error) {
     res.status(500).json({ error: error.message });
@@ -1328,6 +1418,112 @@ app.get('/relatorios/clientes-devedores', async (req, res) => {
 });
 
 
+
+app.get('/auditoria-logs', async (req, res) => {
+  try {
+    const result = await pool.query(`select * from auditoria_logs order by criado_em desc limit 300`);
+    res.json(result.rows);
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+app.get('/centros-custo', async (_req, res) => {
+  try {
+    const result = await pool.query(`select * from centros_custo where ativo=true order by nome asc`);
+    res.json(result.rows);
+  } catch (error) { res.status(500).json({ error: error.message }); }
+});
+
+app.post('/centros-custo', async (req, res) => {
+  try {
+    const result = await pool.query(`insert into centros_custo (codigo, nome, ativo) values ($1,$2,true) returning *`, [req.body.codigo || null, req.body.nome]);
+    await logAudit('centro_custo', result.rows[0].id, 'criar', req.body.nome);
+    res.status(201).json(result.rows[0]);
+  } catch (error) { res.status(500).json({ error: error.message }); }
+});
+
+app.get('/planos-conta', async (_req, res) => {
+  try {
+    const result = await pool.query(`select * from planos_conta where ativo=true order by nome asc`);
+    res.json(result.rows);
+  } catch (error) { res.status(500).json({ error: error.message }); }
+});
+
+app.post('/planos-conta', async (req, res) => {
+  try {
+    const result = await pool.query(`insert into planos_conta (codigo, nome, tipo, ativo) values ($1,$2,$3,true) returning *`, [req.body.codigo || null, req.body.nome, req.body.tipo || 'saida']);
+    await logAudit('plano_conta', result.rows[0].id, 'criar', req.body.nome);
+    res.status(201).json(result.rows[0]);
+  } catch (error) { res.status(500).json({ error: error.message }); }
+});
+
+app.get('/recorrencias-pagar', async (_req, res) => {
+  try {
+    const result = await pool.query(`select * from recorrencias_pagar where ativo=true order by criado_em desc`);
+    res.json(result.rows);
+  } catch (error) { res.status(500).json({ error: error.message }); }
+});
+
+app.post('/recorrencias-pagar', async (req, res) => {
+  try {
+    const result = await pool.query(`insert into recorrencias_pagar (descricao, favorecido, categoria, valor, conta_id, centro_custo_id, plano_conta_id, dia_vencimento, frequencia, ativo) values ($1,$2,$3,$4,$5,$6,$7,$8,$9,true) returning *`, [req.body.descricao, req.body.favorecido || '', req.body.categoria || '', req.body.valor || 0, req.body.conta_id || null, req.body.centro_custo_id || null, req.body.plano_conta_id || null, req.body.dia_vencimento || 1, req.body.frequencia || 'mensal']);
+    await logAudit('recorrencia_pagar', result.rows[0].id, 'criar', req.body.descricao);
+    res.status(201).json(result.rows[0]);
+  } catch (error) { res.status(500).json({ error: error.message }); }
+});
+
+app.post('/recorrencias-pagar/:id/gerar', async (req, res) => {
+  const id = Number(req.params.id);
+  try {
+    const rec = await pool.query(`select * from recorrencias_pagar where id=$1`, [id]);
+    const r = rec.rows[0];
+    if (!r) return res.status(404).json({ error: 'Recorrência não encontrada.' });
+    const venc = req.body.data_vencimento || new Date().toISOString().slice(0,7) + '-' + String(r.dia_vencimento || 1).padStart(2,'0');
+    const codigo = 'PAG-REC-' + id + '-' + venc.replace(/-/g,'');
+    const result = await pool.query(`insert into contas_pagar (codigo, favorecido, categoria, valor_original, valor_aberto, data_lancamento, data_vencimento, status, conta_id, observacoes, centro_custo_id, plano_conta_id) values ($1,$2,$3,$4,$4,$5,$6,'aberto',$7,$8,$9,$10) returning *`, [codigo, r.favorecido, r.categoria, r.valor, new Date().toISOString().slice(0,10), venc, r.conta_id, r.descricao, r.centro_custo_id, r.plano_conta_id]);
+    await logAudit('conta_pagar', result.rows[0].id, 'gerar_recorrencia', r.descricao);
+    res.status(201).json(result.rows[0]);
+  } catch (error) { res.status(500).json({ error: error.message }); }
+});
+
+app.get('/relatorios/lucro-produtos', async (req, res) => {
+  try {
+    const params=[]; let where='where 1=1';
+    if(req.query.startDate){ params.push(String(req.query.startDate)); where += ` and v.data_venda >= $${params.length}`; }
+    if(req.query.endDate){ params.push(String(req.query.endDate)); where += ` and v.data_venda <= $${params.length}`; }
+    const result = await pool.query(`with custo_prod as (select produto_id, case when sum(case when tipo='entrada' then quantidade_kg else 0 end) > 0 then sum(case when tipo='entrada' then quantidade_kg * valor_unitario else 0 end) / nullif(sum(case when tipo='entrada' then quantidade_kg else 0 end),0) else 0 end as custo_medio from movimentacoes_estoque group by produto_id) select p.codigo, p.nome, coalesce(sum(vi.quantidade_kg),0) as quantidade, coalesce(sum(vi.valor_total),0) as receita, coalesce(sum(vi.quantidade_kg * cp.custo_medio),0) as custo_real from venda_itens vi join vendas v on v.id=vi.venda_id join produtos p on p.id=vi.produto_id left join custo_prod cp on cp.produto_id=p.id ${where} group by p.codigo, p.nome order by receita desc limit 200`, params);
+    res.json(result.rows.map(r => ({...r, quantidade:num(r.quantidade), receita:num(r.receita), custo_real:num(r.custo_real), lucro:num(r.receita)-num(r.custo_real), margem:num(r.receita)?((num(r.receita)-num(r.custo_real))/num(r.receita))*100:0 })));
+  } catch (error) { res.status(500).json({ error: error.message }); }
+});
+
+app.get('/relatorios/lucro-clientes', async (req, res) => {
+  try {
+    const params=[]; let where='where 1=1';
+    if(req.query.startDate){ params.push(String(req.query.startDate)); where += ` and v.data_venda >= $${params.length}`; }
+    if(req.query.endDate){ params.push(String(req.query.endDate)); where += ` and v.data_venda <= $${params.length}`; }
+    const result = await pool.query(`select c.nome as cliente, coalesce(sum(v.valor_total),0) as receita from vendas v left join clientes c on c.id=v.cliente_id ${where} group by c.nome order by receita desc limit 200`, params);
+    res.json(result.rows.map(r => ({ cliente:r.cliente, receita:num(r.receita) })));
+  } catch (error) { res.status(500).json({ error: error.message }); }
+});
+
+app.get('/relatorios/compras-fornecedor', async (req, res) => {
+  try {
+    const params=[]; let where='where 1=1';
+    if(req.query.startDate){ params.push(String(req.query.startDate)); where += ` and c.data_compra >= $${params.length}`; }
+    if(req.query.endDate){ params.push(String(req.query.endDate)); where += ` and c.data_compra <= $${params.length}`; }
+    const result = await pool.query(`select f.nome as fornecedor, coalesce(sum(c.valor_total),0) as total, coalesce(sum(c.quantidade_kg),0) as quantidade from compras c left join fornecedores f on f.id=c.fornecedor_id ${where} group by f.nome order by total desc limit 200`, params);
+    res.json(result.rows.map(r => ({ fornecedor:r.fornecedor, total:num(r.total), quantidade:num(r.quantidade) })));
+  } catch (error) { res.status(500).json({ error: error.message }); }
+});
+
+app.post('/estoque-ajustes', async (req, res) => {
+  try {
+    const result = await pool.query(`insert into movimentacoes_estoque (produto_id, tipo, origem, origem_id, quantidade_kg, valor_unitario, data_movimento) values ($1,$2,'ajuste',0,$3,$4,$5) returning *`, [req.body.produto_id, req.body.tipo || 'entrada', req.body.quantidade_kg || 0, req.body.valor_unitario || 0, req.body.data_movimento || new Date().toISOString().slice(0,10)]);
+    await logAudit('estoque', result.rows[0].id, 'ajuste', JSON.stringify(req.body));
+    res.status(201).json(result.rows[0]);
+  } catch (error) { res.status(500).json({ error: error.message }); }
+});
 
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
