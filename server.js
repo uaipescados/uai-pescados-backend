@@ -1258,15 +1258,22 @@ app.get('/estoque-movimentos', async (_req, res) => {
 
 
 
-app.get('/relatorios/financeiro-resumo', async (_req, res) => {
+
+app.get('/relatorios/financeiro-resumo', async (req, res) => {
   try {
+    const startDate = req.query.startDate ? String(req.query.startDate) : '';
+    const endDate = req.query.endDate ? String(req.query.endDate) : '';
+    const finParams=[], recParams=[], payParams=[];
+    let finWhere='', recWhere='', payWhere='';
+    if(startDate){ finParams.push(startDate); recParams.push(startDate); payParams.push(startDate); finWhere += `${finWhere?' and ':' where '}coalesce(data_lancamento::date, now()::date) >= $${finParams.length}`; recWhere += `${recWhere?' and ':' where '}coalesce(data_vencimento, data_lancamento) >= $${recParams.length}`; payWhere += `${payWhere?' and ':' where '}coalesce(data_vencimento, data_lancamento) >= $${payParams.length}`; }
+    if(endDate){ finParams.push(endDate); recParams.push(endDate); payParams.push(endDate); finWhere += `${finWhere?' and ':' where '}coalesce(data_lancamento::date, now()::date) <= $${finParams.length}`; recWhere += `${recWhere?' and ':' where '}coalesce(data_vencimento, data_lancamento) <= $${recParams.length}`; payWhere += `${payWhere?' and ':' where '}coalesce(data_vencimento, data_lancamento) <= $${payParams.length}`; }
     const [fin, rec, pay] = await Promise.all([
       pool.query(`select 
         coalesce(sum(case when tipo='entrada' then valor else 0 end),0) as entradas,
         coalesce(sum(case when tipo='saida' then valor else 0 end),0) as saidas
-        from lancamentos_financeiros`),
-      pool.query(`select coalesce(sum(valor_aberto),0) as receber from contas_receber where coalesce(valor_aberto,0) > 0`),
-      pool.query(`select coalesce(sum(valor_aberto),0) as pagar from contas_pagar where coalesce(valor_aberto,0) > 0`)
+        from lancamentos_financeiros ${finWhere}`, finParams),
+      pool.query(`select coalesce(sum(valor_aberto),0) as receber from contas_receber ${recWhere} ${recWhere?' and ':' where '}coalesce(valor_aberto,0) > 0`, recParams),
+      pool.query(`select coalesce(sum(valor_aberto),0) as pagar from contas_pagar ${payWhere} ${payWhere?' and ':' where '}coalesce(valor_aberto,0) > 0`, payParams)
     ]);
     res.json({
       entradas: num(fin.rows[0].entradas),
@@ -1279,32 +1286,41 @@ app.get('/relatorios/financeiro-resumo', async (_req, res) => {
   }
 });
 
-app.get('/relatorios/financeiro-mensal', async (_req, res) => {
+app.get('/relatorios/financeiro-mensal', async (req, res) => {
   try {
+    const year = req.query.year ? String(req.query.year) : '';
+    const month = req.query.month ? String(req.query.month).padStart(2,'0') : '';
+    const params=[]; let where='';
+    if(year){ params.push(year); where += `${where?' and ':' where '}to_char(coalesce(data_lancamento, now()), 'YYYY') = $${params.length}`; }
+    if(month){ params.push(month); where += `${where?' and ':' where '}to_char(coalesce(data_lancamento, now()), 'MM') = $${params.length}`; }
     const result = await pool.query(`
       select to_char(date_trunc('month', coalesce(data_lancamento, now())), 'YYYY-MM') as mes,
       coalesce(sum(case when tipo='entrada' then valor else 0 end),0) as entradas,
       coalesce(sum(case when tipo='saida' then valor else 0 end),0) as saidas
       from lancamentos_financeiros
+      ${where}
       group by 1
       order by 1 desc
-      limit 12
-    `);
+      limit 120
+    `, params);
     res.json(result.rows.map(r => ({ mes:r.mes, entradas:num(r.entradas), saidas:num(r.saidas), resultado:num(r.entradas)-num(r.saidas) })));
   } catch (error) {
     res.status(500).json({ error: error.message });
   }
 });
 
-app.get('/relatorios/clientes-devedores', async (_req, res) => {
+app.get('/relatorios/clientes-devedores', async (req, res) => {
   try {
+    const params=[]; let where='where coalesce(valor_aberto,0) > 0';
+    if(req.query.startDate){ params.push(String(req.query.startDate)); where += ` and coalesce(data_vencimento, data_lancamento) >= $${params.length}`; }
+    if(req.query.endDate){ params.push(String(req.query.endDate)); where += ` and coalesce(data_vencimento, data_lancamento) <= $${params.length}`; }
     const result = await pool.query(`
       select codigo, nome_cliente, data_vencimento, valor_aberto
       from contas_receber
-      where coalesce(valor_aberto,0) > 0
+      ${where}
       order by valor_aberto desc, data_vencimento asc
-      limit 20
-    `);
+      limit 200
+    `, params);
     res.json(result.rows);
   } catch (error) {
     res.status(500).json({ error: error.message });
